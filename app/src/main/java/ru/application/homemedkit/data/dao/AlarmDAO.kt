@@ -28,8 +28,8 @@ interface AlarmDAO : BaseDAO<Alarm> {
     @Query("SELECT * FROM alarms")
     suspend fun getAll(): List<Alarm>
 
-    @Query("SELECT * FROM alarms WHERE `trigger` < :millis ORDER BY `trigger` ASC")
-    suspend fun getExpired(millis: Long): List<Alarm>
+    @Query("SELECT DISTINCT intakeId FROM alarms")
+    suspend fun getIntakeIds(): List<Long>
 
     @Query("SELECT * FROM alarms WHERE alarmId = :alarmId")
     suspend fun getById(alarmId: Long): Alarm?

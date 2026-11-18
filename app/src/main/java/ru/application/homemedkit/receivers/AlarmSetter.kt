@@ -7,7 +7,6 @@ import android.app.PendingIntent.*
 import android.content.Context
 import android.content.Intent
 import ru.application.homemedkit.data.MedicineDatabase
-import ru.application.homemedkit.data.dto.Alarm
 import ru.application.homemedkit.utils.ALARM_ID
 import ru.application.homemedkit.utils.Formatter
 import ru.application.homemedkit.utils.Preferences
@@ -19,16 +18,16 @@ class AlarmSetter private constructor(private val context: Context) {
     private val manager = context.getSystemService(AlarmManager::class.java)
     private val database = MedicineDatabase.getInstance(context)
 
-    private val alarmIntent = Intent(context, AlarmReceiver::class.java)
-    private val preAlarmIntent = Intent(context, PreAlarmReceiver::class.java)
+    // A new Intent for every PendingIntent: receivers run in parallel on Dispatchers.Default,
+    // and a shared Intent could get another alarm's id between putExtra() and getBroadcast()
+    private fun alarmPending(takenId: Long, flags: Int = FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE) =
+        getBroadcast(context, takenId.toInt(), Intent(context, AlarmReceiver::class.java).putExtra(ALARM_ID, takenId), flags)
+
+    private fun preAlarmPending(alarmId: Long, flags: Int = FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE) =
+        getBroadcast(context, alarmId.toInt(), Intent(context, PreAlarmReceiver::class.java).putExtra(ALARM_ID, alarmId), flags)
 
     fun setAlarm(takenId: Long, trigger: Long) {
-        val pending = getBroadcast(
-            context,
-            takenId.toInt(),
-            alarmIntent.putExtra(ALARM_ID, takenId),
-            FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
-        )
+        val pending = alarmPending(takenId)
 
         with(manager) {
             if (context.canScheduleExactAlarms()) {
@@ -49,12 +48,7 @@ class AlarmSetter private constructor(private val context: Context) {
         val alarm = database.alarmDAO().getNextByIntakeId(intakeId) ?: return
         val preTrigger = alarm.trigger - 1800000L
 
-        val pending = getBroadcast(
-            context,
-            alarm.alarmId.toInt(),
-            preAlarmIntent.putExtra(ALARM_ID, alarm.alarmId),
-            FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
-        )
+        val pending = preAlarmPending(alarm.alarmId)
 
         with(manager) {
             if (context.canScheduleExactAlarms()) {
@@ -74,49 +68,20 @@ class AlarmSetter private constructor(private val context: Context) {
     suspend fun removeAlarm(intakeId: Long) {
         val nextAlarm = database.alarmDAO().getNextByIntakeId(intakeId) ?: return
 
-        val pendingA = getBroadcast(
-            context,
-            nextAlarm.alarmId.toInt(),
-            preAlarmIntent.putExtra(ALARM_ID, nextAlarm.alarmId),
-            FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
-        )
-
-        val pendingB = getBroadcast(
-            context,
-            nextAlarm.alarmId.toInt(),
-            alarmIntent.putExtra(ALARM_ID, nextAlarm.alarmId),
-            FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE
-        )
-
         with(manager) {
-            cancel(pendingA)
-            cancel(pendingB)
+            cancel(preAlarmPending(nextAlarm.alarmId))
+            cancel(alarmPending(nextAlarm.alarmId))
         }
     }
 
-    suspend fun resetAll() = database.alarmDAO().getExpired(System.currentTimeMillis())
-        .mapNotNull(Alarm::intakeId)
-        .forEach { setPreAlarm(it) }
+    // Re-arms every intake that still has scheduled alarms, not only those with already expired ones:
+    // after a reboot no alarm is pending, so an intake whose next alarm is in the future would stay silent
+    suspend fun resetAll() = database.alarmDAO().getIntakeIds().forEach { setPreAlarm(it) }
 
     suspend fun cancelAll() = database.alarmDAO().getAll().forEach {
         with(manager) {
-            cancel(
-                getBroadcast(
-                    context,
-                    it.alarmId.toInt(),
-                    preAlarmIntent.putExtra(ALARM_ID, it.alarmId),
-                    FLAG_CANCEL_CURRENT or FLAG_IMMUTABLE
-                )
-            )
-
-            cancel(
-                getBroadcast(
-                    context,
-                    it.alarmId.toInt(),
-                    alarmIntent.putExtra(ALARM_ID, it.alarmId),
-                    FLAG_CANCEL_CURRENT or FLAG_IMMUTABLE
-                )
-            )
+            cancel(preAlarmPending(it.alarmId, FLAG_CANCEL_CURRENT or FLAG_IMMUTABLE))
+            cancel(alarmPending(it.alarmId, FLAG_CANCEL_CURRENT or FLAG_IMMUTABLE))
         }
     }
 
